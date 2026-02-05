@@ -110,6 +110,7 @@ $router->post('/tld-registry/import-whois', [TldRegistryController::class, 'impo
 $router->post('/tld-registry/start-progressive-import', [TldRegistryController::class, 'startProgressiveImport']);
 $router->get('/tld-registry/import-progress/{log_id}', [TldRegistryController::class, 'importProgress']);
 $router->get('/tld-registry/api/import-progress', [TldRegistryController::class, 'apiGetImportProgress']);
+$router->post('/tld-registry/custom', [TldRegistryController::class, 'addCustom']);
 $router->post('/tld-registry/bulk-delete', [TldRegistryController::class, 'bulkDelete']);
 $router->get('/tld-registry/check-updates', [TldRegistryController::class, 'checkUpdates']);
 $router->get('/tld-registry/{id}/toggle-active', [TldRegistryController::class, 'toggleActive']);
@@ -186,5 +187,4 @@ $router->post('/tags/bulk-delete', [TagController::class, 'bulkDelete']);
 $router->get('/tags/{id}', [TagController::class, 'show']);
 $router->post('/tags/bulk-add-to-domains', [TagController::class, 'bulkAddToDomains']);
 $router->post('/tags/bulk-remove-from-domains', [TagController::class, 'bulkRemoveFromDomains']);
-
 
