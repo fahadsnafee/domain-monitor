@@ -315,6 +315,7 @@ CREATE TABLE IF NOT EXISTS tld_registry (
     record_last_updated TIMESTAMP NULL,
     registration_date DATE NULL,
     is_active BOOLEAN DEFAULT TRUE,
+    is_custom BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_tld (tld),
@@ -413,4 +414,3 @@ CREATE TABLE IF NOT EXISTS migrations (
 -- Mark this consolidated migration as executed
 INSERT INTO migrations (migration) VALUES ('000_initial_schema_v1.1.0.sql')
 ON DUPLICATE KEY UPDATE migration=migration;
-

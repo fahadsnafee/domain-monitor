@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS tld_registry (
     record_last_updated TIMESTAMP NULL,
     registration_date DATE NULL,
     is_active BOOLEAN DEFAULT TRUE,
+    is_custom BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_tld (tld),

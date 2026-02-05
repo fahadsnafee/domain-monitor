@@ -24,6 +24,30 @@ class TldRegistry extends Model
     }
 
     /**
+     * Get TLD by domain extension (including inactive)
+     */
+    public function getByTldAny(string $tld): ?array
+    {
+        // Ensure TLD starts with dot
+        if (!str_starts_with($tld, '.')) {
+            $tld = '.' . $tld;
+        }
+
+        $stmt = $this->db->prepare("SELECT * FROM tld_registry WHERE tld = ? LIMIT 1");
+        $stmt->execute([$tld]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Get count of custom TLDs
+     */
+    public function getCustomCount(): int
+    {
+        $stmt = $this->db->query("SELECT COUNT(*) as count FROM tld_registry WHERE is_custom = 1");
+        return (int)($stmt->fetch()['count'] ?? 0);
+    }
+
+    /**
      * Get all active TLDs
      */
     public function getAllActive(): array
@@ -56,7 +80,7 @@ class TldRegistry extends Model
         $tld = $data['tld'];
         
         // Check if TLD already exists
-        $existing = $this->getByTld($tld);
+        $existing = $this->getByTldAny($tld);
         
         if ($existing) {
             // Update existing record

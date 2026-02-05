@@ -34,21 +34,59 @@ $currentFilters = $filters ?? ['search' => '', 'sort' => 'tld', 'order' => 'asc'
         <i class="fas fa-history mr-2"></i>
         Import Logs
     </a>
-    <form method="POST" action="/tld-registry/start-progressive-import" class="inline">
+    <form method="POST" action="/tld-registry/start-progressive-import" class="inline tld-import-form">
         <?= csrf_field() ?>
         <input type="hidden" name="import_type" value="check_updates">
+        <input type="hidden" name="custom_policy" value="<?= htmlspecialchars($customTldPolicy ?? '') ?>">
+        <input type="hidden" name="remember_custom_policy" value="">
         <button type="submit" <?= $tldStats['total'] == 0 ? 'disabled' : '' ?> class="inline-flex items-center px-4 py-2 <?= $tldStats['total'] == 0 ? 'bg-gray-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700' ?> text-white text-sm rounded-lg transition-colors font-medium" title="<?= $tldStats['total'] == 0 ? 'Import TLDs first' : 'Check for IANA updates' ?>">
             <i class="fas fa-sync-alt mr-2"></i>
             Check Updates
         </button>
     </form>
-    <form method="POST" action="/tld-registry/start-progressive-import" class="inline">
+    <form method="POST" action="/tld-registry/start-progressive-import" class="inline tld-import-form">
         <?= csrf_field() ?>
         <input type="hidden" name="import_type" value="complete_workflow">
+        <input type="hidden" name="custom_policy" value="<?= htmlspecialchars($customTldPolicy ?? '') ?>">
+        <input type="hidden" name="remember_custom_policy" value="">
         <button type="submit" class="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 transition-colors font-medium" title="Complete TLD import workflow: TLD List → RDAP → WHOIS → Registry URLs">
             <i class="fas fa-rocket mr-2"></i>
             Import TLDs
         </button>
+    </form>
+</div>
+<div class="mb-6 bg-white rounded-lg border border-gray-200 p-5">
+    <div class="flex items-center justify-between mb-4">
+        <div>
+            <h3 class="text-sm font-semibold text-gray-900">Add Custom TLD</h3>
+            <p class="text-xs text-gray-500">Manually register a TLD with RDAP and WHOIS details.</p>
+        </div>
+    </div>
+    <form method="POST" action="/tld-registry/custom" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <?= csrf_field() ?>
+        <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1.5" for="custom-tld">TLD</label>
+            <input type="text" name="tld" id="custom-tld" placeholder=".example" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-sm" required>
+        </div>
+        <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1.5" for="custom-rdap">RDAP Server URL(s)</label>
+            <input type="text" name="rdap_servers" id="custom-rdap" placeholder="https://rdap.example" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-sm" required>
+            <p class="text-[11px] text-gray-500 mt-1">Comma-separated if multiple.</p>
+        </div>
+        <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1.5" for="custom-whois">WHOIS Server</label>
+            <input type="text" name="whois_server" id="custom-whois" placeholder="whois.example" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-sm" required>
+        </div>
+        <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1.5" for="custom-registry">Registry URL (optional)</label>
+            <input type="text" name="registry_url" id="custom-registry" placeholder="https://registry.example" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-sm">
+        </div>
+        <div class="lg:col-span-4 flex justify-end">
+            <button type="submit" class="inline-flex items-center px-4 py-2 bg-emerald-600 text-white text-sm rounded-lg hover:bg-emerald-700 transition-colors font-medium">
+                <i class="fas fa-plus mr-2"></i>
+                Save Custom TLD
+            </button>
+        </div>
     </form>
 </div>
 <?php else: ?>
@@ -612,6 +650,30 @@ document.addEventListener('DOMContentLoaded', function() {
         checkbox.addEventListener('change', updateSelectedCount);
     });
     updateSelectedCount();
+
+    const customTldCount = <?= (int)($customTldCount ?? 0) ?>;
+    const savedPolicy = '<?= htmlspecialchars($customTldPolicy ?? '') ?>';
+    const importForms = document.querySelectorAll('.tld-import-form');
+
+    if (importForms.length > 0) {
+        importForms.forEach(form => {
+            form.addEventListener('submit', function(event) {
+                const policyInput = form.querySelector('input[name="custom_policy"]');
+                const rememberInput = form.querySelector('input[name="remember_custom_policy"]');
+
+                if (customTldCount > 0 && !savedPolicy && policyInput) {
+                    event.preventDefault();
+
+                    const overwrite = confirm('Custom TLDs exist. Overwrite them with IANA import data? Click Cancel to preserve custom data and skip future prompts.');
+                    policyInput.value = overwrite ? 'overwrite' : 'preserve';
+                    if (rememberInput) {
+                        rememberInput.value = '1';
+                    }
+                    form.submit();
+                }
+            });
+        });
+    }
 });
 </script>
 
