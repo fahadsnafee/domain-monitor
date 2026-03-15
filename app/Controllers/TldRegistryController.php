@@ -6,6 +6,7 @@ use Core\Controller;
 use Core\Auth;
 use App\Models\TldRegistry;
 use App\Models\TldImportLog;
+use App\Models\Setting;
 use App\Services\TldRegistryService;
 use App\Services\Logger;
 
@@ -13,6 +14,7 @@ class TldRegistryController extends Controller
 {
     private TldRegistry $tldModel;
     private TldImportLog $importLogModel;
+    private Setting $settingsModel;
     private TldRegistryService $tldService;
     private Logger $logger;
 
@@ -20,6 +22,7 @@ class TldRegistryController extends Controller
     {
         $this->tldModel = new TldRegistry();
         $this->importLogModel = new TldImportLog();
+        $this->settingsModel = new Setting();
         $this->tldService = new TldRegistryService();
         $this->logger = new Logger('tld_registry_controller');
     }
@@ -38,11 +41,15 @@ class TldRegistryController extends Controller
 
         $result = $this->tldModel->getPaginated($page, $perPage, $search, $sort, $order, $status, $dataType);
         $tldStats = $this->tldModel->getStatistics();
+        $customTldCount = $this->tldModel->getCustomCount();
+        $customTldPolicy = $this->settingsModel->getValue('tld_import_custom_policy', '');
 
         $this->view('tld-registry/index', [
             'tlds' => $result['tlds'],
             'pagination' => $result['pagination'],
             'tldStats' => $tldStats,
+            'customTldCount' => $customTldCount,
+            'customTldPolicy' => $customTldPolicy,
             'filters' => [
                 'search' => $search,
                 'status' => $status,
@@ -250,7 +257,14 @@ class TldRegistryController extends Controller
         $this->verifyCsrf('/tld-registry');
 
         $importType = $_POST['import_type'] ?? '';
-        
+        $customPolicy = $_POST['custom_policy'] ?? '';
+        $rememberPolicy = ($_POST['remember_custom_policy'] ?? '') === '1';
+        $customPolicy = in_array($customPolicy, ['overwrite', 'preserve'], true) ? $customPolicy : '';
+
+        if ($customPolicy !== '' && $rememberPolicy) {
+            $this->settingsModel->setValue('tld_import_custom_policy', $customPolicy);
+        }
+
         $this->logger->separator('Start Progressive Import');
         $this->logger->info('Import requested', [
             'type' => $importType,
@@ -266,7 +280,7 @@ class TldRegistryController extends Controller
         }
 
         try {
-            $result = $this->tldService->startProgressiveImport($importType);
+            $result = $this->tldService->startProgressiveImport($importType, $customPolicy);
             
             $this->logger->info('Import started', [
                 'status' => $result['status'],
@@ -587,6 +601,98 @@ class TldRegistryController extends Controller
             'importStats' => $importStats,
             'title' => 'TLD Import Logs'
         ]);
+    }
+
+    /**
+     * Add a custom TLD entry with RDAP/WHOIS details
+     */
+    public function addCustom()
+    {
+        Auth::requireAdmin();
+
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            $this->redirect('/tld-registry');
+            return;
+        }
+
+        // CSRF Protection
+        $this->verifyCsrf('/tld-registry');
+
+        $tldInput = \App\Helpers\InputValidator::sanitizeText($_POST['tld'] ?? '');
+        $rdapInput = \App\Helpers\InputValidator::sanitizeText($_POST['rdap_servers'] ?? '');
+        $whoisInput = \App\Helpers\InputValidator::sanitizeText($_POST['whois_server'] ?? '');
+        $registryUrl = \App\Helpers\InputValidator::sanitizeText($_POST['registry_url'] ?? '');
+
+        if ($tldInput === '' || $rdapInput === '' || $whoisInput === '') {
+            $_SESSION['error'] = 'TLD, RDAP server, and WHOIS server are required.';
+            $this->redirect('/tld-registry');
+            return;
+        }
+
+        $tldInput = ltrim(strtolower($tldInput), '.');
+        $tldValidation = \App\Helpers\InputValidator::validateLengthRange($tldInput, 2, 63, 'TLD');
+        if ($tldValidation) {
+            $_SESSION['error'] = $tldValidation;
+            $this->redirect('/tld-registry');
+            return;
+        }
+
+        if (!preg_match('/^(?=.{2,63}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])$/i', $tldInput)) {
+            $_SESSION['error'] = 'TLD format is invalid.';
+            $this->redirect('/tld-registry');
+            return;
+        }
+
+        $rdapServers = array_values(array_filter(array_map('trim', preg_split('/\s*,\s*/', $rdapInput))));
+        if (empty($rdapServers)) {
+            $_SESSION['error'] = 'At least one RDAP server URL is required.';
+            $this->redirect('/tld-registry');
+            return;
+        }
+
+        foreach ($rdapServers as $rdapServer) {
+            if (!\App\Helpers\InputValidator::validateUrl($rdapServer)) {
+                $_SESSION['error'] = "Invalid RDAP URL: {$rdapServer}";
+                $this->redirect('/tld-registry');
+                return;
+            }
+        }
+
+        if (!preg_match('/^[a-z0-9.-]+(?::\d{1,5})?$/i', $whoisInput)) {
+            $_SESSION['error'] = 'WHOIS server must be a valid hostname (optional port allowed).';
+            $this->redirect('/tld-registry');
+            return;
+        }
+
+        if ($registryUrl !== '' && !\App\Helpers\InputValidator::validateUrl($registryUrl)) {
+            $_SESSION['error'] = 'Registry URL must be a valid URL.';
+            $this->redirect('/tld-registry');
+            return;
+        }
+
+        $tld = '.' . $tldInput;
+        $data = [
+            'tld' => $tld,
+            'rdap_servers' => json_encode($rdapServers),
+            'whois_server' => $whoisInput,
+            'registry_url' => $registryUrl !== '' ? $registryUrl : null,
+            'is_custom' => 1,
+            'is_active' => 1,
+            'updated_at' => date('Y-m-d H:i:s')
+        ];
+
+        try {
+            $existing = $this->tldModel->getByTldAny($tld);
+            $this->tldModel->createOrUpdate($data);
+
+            $_SESSION['success'] = $existing
+                ? "Custom TLD {$tld} updated successfully."
+                : "Custom TLD {$tld} added successfully.";
+        } catch (\Exception $e) {
+            $_SESSION['error'] = 'Failed to add custom TLD: ' . $e->getMessage();
+        }
+
+        $this->redirect('/tld-registry');
     }
 
     /**

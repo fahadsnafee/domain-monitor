@@ -12,6 +12,7 @@ class WhoisService
     
     // Cache TTL in seconds (24 hours)
     private const CACHE_TTL = 86400;
+    private const IQ_RDAP_BASE_URL = 'https://whois.reg.iq/rdap/';
     private TldRegistry $tldModel;
     
     /**
@@ -33,6 +34,9 @@ class WhoisService
     public function getDomainInfo(string $domain): ?array
     {
         try {
+            $domain = strtolower(trim($domain));
+            $iqRdapOnly = $this->isIqRdapOnlyDomain($domain);
+
             // Get TLD
             $parts = explode('.', $domain);
             if (count($parts) < 2) {
@@ -61,6 +65,11 @@ class WhoisService
             $rdapUrl = $servers['rdap_url'];
             $whoisServer = $servers['whois_server'];
 
+            // Force REG.iq RDAP endpoint for Iraqi namespaces to avoid WHOIS polling
+            if ($iqRdapOnly && !$rdapUrl) {
+                $rdapUrl = self::IQ_RDAP_BASE_URL;
+            }
+
             // Try RDAP first (modern, structured JSON protocol)
             if ($rdapUrl) {
                 $rdapData = $this->queryRDAPGeneric($domain, $rdapUrl);
@@ -83,7 +92,7 @@ class WhoisService
                         }
                     }
                     
-                    if (empty($rdapData['expiration_date']) && !$isAvailable && $whoisServer) {
+                    if (empty($rdapData['expiration_date']) && !$isAvailable && $whoisServer && !$iqRdapOnly) {
                         $whoisData = $this->queryWhois($domain, $whoisServer);
                         if ($whoisData) {
                             // Check if we got a referral to another WHOIS server
@@ -112,7 +121,16 @@ class WhoisService
                     }
                     return $rdapData;
                 }
+                // For Iraqi namespaces, do not fall back to WHOIS polling when RDAP fails
+                if ($iqRdapOnly) {
+                    return null;
+                }
+
                 // If RDAP failed, fall through to WHOIS
+            }
+
+            if ($iqRdapOnly) {
+                return null;
             }
 
             // Fallback to WHOIS if RDAP not available or failed
@@ -204,6 +222,22 @@ class WhoisService
             ]);
             return null;
         }
+    }
+
+    /**
+     * Iraqi namespaces should be queried via REG.iq RDAP endpoint only.
+     */
+    private function isIqRdapOnlyDomain(string $domain): bool
+    {
+        $suffixes = ['.com.iq', '.net.iq', '.tv.iq', '.edu.iq', '.iq'];
+
+        foreach ($suffixes as $suffix) {
+            if (str_ends_with($domain, $suffix)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

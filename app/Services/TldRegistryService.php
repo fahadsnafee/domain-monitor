@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\TldRegistry;
 use App\Models\TldImportLog;
+use App\Models\Setting;
 use App\Services\Logger;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\RequestException;
@@ -13,6 +14,7 @@ class TldRegistryService
     private Client $httpClient;
     private TldRegistry $tldModel;
     private TldImportLog $importLogModel;
+    private Setting $settingsModel;
     private Logger $logger;
 
     // IANA URLs
@@ -49,6 +51,7 @@ class TldRegistryService
         ]);
         $this->tldModel = new TldRegistry();
         $this->importLogModel = new TldImportLog();
+        $this->settingsModel = new Setting();
         $this->logger = new Logger('tld_import');
     }
 
@@ -127,6 +130,7 @@ class TldRegistryService
     public function importTldList(): array
     {
         $logId = $this->importLogModel->startImport('tld_list');
+        $customPolicy = $this->getCustomPolicy();
         $stats = [
             'total_tlds' => 0,
             'new_tlds' => 0,
@@ -208,8 +212,12 @@ class TldRegistryService
             // Process each TLD
             foreach ($tlds as $tld) {
                 try {
-                    $result = $this->processTldEntry($tld);
+                    $result = $this->processTldEntry($tld, $customPolicy);
                     
+                    if (!empty($result['skipped'])) {
+                        continue;
+                    }
+
                     if ($result['is_new']) {
                         $stats['new_tlds']++;
                     } else {
@@ -237,6 +245,7 @@ class TldRegistryService
     public function importRdapData(): array
     {
         $logId = $this->importLogModel->startImport('rdap');
+        $customPolicy = $this->getCustomPolicy();
         $stats = [
             'total_tlds' => 0,
             'new_tlds' => 0,
@@ -277,8 +286,12 @@ class TldRegistryService
                     $stats['total_tlds']++;
                     
                     try {
-                        $result = $this->processTldRdapData($tld, $rdapServers, $normalizedPublicationDate);
+                        $result = $this->processTldRdapData($tld, $rdapServers, $normalizedPublicationDate, $customPolicy);
                         
+                        if (!empty($result['skipped'])) {
+                            continue;
+                        }
+
                         if ($result['is_new']) {
                             $stats['new_tlds']++;
                         } else {
@@ -307,6 +320,7 @@ class TldRegistryService
     public function importWhoisDataForMissingTlds(): array
     {
         $logId = $this->importLogModel->startImport('whois');
+        $customPolicy = $this->getCustomPolicy();
         $stats = [
             'total_tlds' => 0,
             'new_tlds' => 0,
@@ -316,9 +330,13 @@ class TldRegistryService
 
         try {
             // Get TLDs that need WHOIS data (missing WHOIS server or old data)
-            $tldsNeedingWhois = $this->getTldsNeedingWhoisData();
+            $tldsNeedingWhois = $this->getTldsNeedingWhoisData(100, 0, $customPolicy === 'preserve');
             
             foreach ($tldsNeedingWhois as $index => $tld) {
+                if ($this->shouldSkipCustom($tld, $customPolicy)) {
+                    continue;
+                }
+
                 $stats['total_tlds']++;
                 
                 try {
@@ -354,12 +372,14 @@ class TldRegistryService
     /**
      * Get TLDs that need WHOIS data (missing or outdated)
      */
-    private function getTldsNeedingWhoisData(int $limit = 100, int $startFromId = 0): array
+    private function getTldsNeedingWhoisData(int $limit = 100, int $startFromId = 0, bool $excludeCustom = false): array
     {
         // Process ALL TLDs systematically (A to Z, or ID 1 to last ID)
         // This ensures we get complete data for every TLD, even if some don't have WHOIS/RDAP data
+        $customClause = $excludeCustom ? "AND is_custom = 0" : "";
         $sql = "SELECT * FROM tld_registry 
                 WHERE is_active = 1 
+                {$customClause}
                 AND id > " . intval($startFromId) . "
                 ORDER BY 
                     CASE 
@@ -481,13 +501,19 @@ class TldRegistryService
      */
     public function getTldsNeedingWhoisCount(?int $logId = null): int
     {
+        $customPolicy = $this->getCustomPolicyForLog($logId);
+        $excludeCustom = $customPolicy === 'preserve';
+
         if ($logId) {
             // For a specific import session, count TLDs that haven't been processed yet
             $lastProcessedId = $this->getLastProcessedTldId($logId);
-            $sql = "SELECT COUNT(*) as count FROM tld_registry WHERE is_active = 1 AND id > " . intval($lastProcessedId);
+            $sql = "SELECT COUNT(*) as count FROM tld_registry WHERE is_active = 1"
+                . ($excludeCustom ? " AND is_custom = 0" : "")
+                . " AND id > " . intval($lastProcessedId);
         } else {
             // Count ALL active TLDs since we process them all systematically
-            $sql = "SELECT COUNT(*) as count FROM tld_registry WHERE is_active = 1";
+            $sql = "SELECT COUNT(*) as count FROM tld_registry WHERE is_active = 1"
+                . ($excludeCustom ? " AND is_custom = 0" : "");
         }
         
         $result = $this->tldModel->query($sql);
@@ -497,9 +523,11 @@ class TldRegistryService
     /**
      * Start progressive import for any type
      */
-    public function startProgressiveImport(string $importType): array
+    public function startProgressiveImport(string $importType, ?string $customPolicy = null): array
     {
         $logId = $this->importLogModel->startImport($importType);
+        $customPolicy = $this->normalizeCustomPolicy($customPolicy ?? $this->getCustomPolicy());
+        $this->updateImportDetails($logId, ['custom_policy' => $customPolicy]);
         
         switch ($importType) {
             case 'tld_list':
@@ -611,6 +639,58 @@ class TldRegistryService
     }
 
     /**
+     * Resolve the custom TLD import policy
+     */
+    private function getCustomPolicy(): string
+    {
+        $policy = $this->settingsModel->getValue('tld_import_custom_policy', 'preserve');
+        return $this->normalizeCustomPolicy($policy);
+    }
+
+    /**
+     * Normalize policy to a known value
+     */
+    private function normalizeCustomPolicy(?string $policy): string
+    {
+        return in_array($policy, ['overwrite', 'preserve'], true) ? $policy : 'preserve';
+    }
+
+    /**
+     * Get policy for a specific import log (fallback to global setting)
+     */
+    private function getCustomPolicyForLog(?int $logId): string
+    {
+        if (!$logId) {
+            return $this->getCustomPolicy();
+        }
+
+        $log = $this->importLogModel->find($logId);
+        $details = $log['details'] ? json_decode($log['details'], true) : [];
+        $policy = $details['custom_policy'] ?? null;
+
+        return $this->normalizeCustomPolicy($policy ?? $this->getCustomPolicy());
+    }
+
+    /**
+     * Update import log details (merge with existing)
+     */
+    private function updateImportDetails(int $logId, array $details): void
+    {
+        $log = $this->importLogModel->find($logId);
+        $existingDetails = $log['details'] ? json_decode($log['details'], true) : [];
+        $mergedDetails = array_merge($existingDetails, $details);
+        $this->importLogModel->update($logId, ['details' => json_encode($mergedDetails)]);
+    }
+
+    /**
+     * Determine if custom TLD should be skipped during import
+     */
+    private function shouldSkipCustom(array $tld, string $customPolicy): bool
+    {
+        return $customPolicy === 'preserve' && !empty($tld['is_custom']);
+    }
+
+    /**
      * Process TLD list batch
      */
     private function processTldListBatch(int $logId): array
@@ -717,7 +797,7 @@ class TldRegistryService
         
         // If this is the first batch, get total count
         if ($currentProgress['total'] == 0) {
-            $currentProgress['total'] = $this->getTldsNeedingWhoisCount();
+            $currentProgress['total'] = $this->getTldsNeedingWhoisCount($logId);
             $this->logger->info("First batch - Total TLDs to process: {$currentProgress['total']}");
         }
         
@@ -726,7 +806,8 @@ class TldRegistryService
         $this->logger->info("Resuming from last processed ID: {$lastProcessedId}");
         
         // Get next batch of TLDs (increased to 50 for faster processing)
-        $tldsNeedingWhois = $this->getTldsNeedingWhoisData(50, $lastProcessedId);
+        $customPolicy = $this->getCustomPolicyForLog($logId);
+        $tldsNeedingWhois = $this->getTldsNeedingWhoisData(50, $lastProcessedId, $customPolicy === 'preserve');
         $this->logger->info("Retrieved batch of " . count($tldsNeedingWhois) . " TLDs for processing");
         
         if (empty($tldsNeedingWhois)) {
@@ -1042,7 +1123,8 @@ class TldRegistryService
                 $this->logger->info("Resuming from last processed ID: {$lastProcessedId}");
                 
                 // Get next batch of TLDs needing WHOIS data (increased batch size)
-                $tldsNeedingWhois = $this->getTldsNeedingWhoisData(50, $lastProcessedId);
+                $customPolicy = $this->getCustomPolicyForLog($logId);
+                $tldsNeedingWhois = $this->getTldsNeedingWhoisData(50, $lastProcessedId, $customPolicy === 'preserve');
                 $this->logger->info("Retrieved " . count($tldsNeedingWhois) . " TLDs for WHOIS processing");
                 
                 if (empty($tldsNeedingWhois)) {
@@ -1306,7 +1388,7 @@ class TldRegistryService
     /**
      * Process a single TLD entry from the TLD list
      */
-    private function processTldEntry(string $tld): array
+    private function processTldEntry(string $tld, string $customPolicy): array
     {
         // Ensure TLD starts with dot
         if (!str_starts_with($tld, '.')) {
@@ -1321,8 +1403,12 @@ class TldRegistryService
         ];
 
         // Check if TLD already exists
-        $existing = $this->tldModel->getByTld($tld);
+        $existing = $this->tldModel->getByTldAny($tld);
         $isNew = !$existing;
+
+        if ($existing && $this->shouldSkipCustom($existing, $customPolicy)) {
+            return ['is_new' => false, 'skipped' => true];
+        }
 
         if ($existing) {
             // Update existing record (just update the timestamp)
@@ -1340,7 +1426,7 @@ class TldRegistryService
     /**
      * Process RDAP data for a single TLD
      */
-    private function processTldRdapData(string $tld, array $rdapServers, ?string $publicationDate): array
+    private function processTldRdapData(string $tld, array $rdapServers, ?string $publicationDate, string $customPolicy): array
     {
         // Ensure TLD starts with dot
         if (!str_starts_with($tld, '.')) {
@@ -1356,8 +1442,12 @@ class TldRegistryService
         ];
 
         // Check if TLD already exists
-        $existing = $this->tldModel->getByTld($tld);
+        $existing = $this->tldModel->getByTldAny($tld);
         $isNew = !$existing;
+
+        if ($existing && $this->shouldSkipCustom($existing, $customPolicy)) {
+            return ['is_new' => false, 'skipped' => true];
+        }
 
         if ($existing) {
             // Update existing record
